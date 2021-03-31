@@ -27,6 +27,11 @@
     start_epoch/1,
     end_epoch/1,
     rewards/1,
+
+    %% reward v2 accessors
+    reward_account/1,
+    reward_amount/1,
+
     sign/2,
     fee/1,
     is_valid/2,
@@ -92,6 +97,14 @@ end_epoch(#blockchain_txn_rewards_v2_pb{end_epoch=End}) ->
 -spec rewards(txn_rewards_v2()) -> [reward_v2()].
 rewards(#blockchain_txn_rewards_v2_pb{rewards=Rewards}) ->
     Rewards.
+
+-spec reward_account(reward_v2()) -> binary().
+reward_account(#blockchain_txn_reward_v2_pb{account = Account}) ->
+    Account.
+
+-spec reward_amount(reward_v2()) -> non_neg_integer().
+reward_amount(#blockchain_txn_reward_v2_pb{amount = Amount}) ->
+    Amount.
 
 -spec sign(txn_rewards_v2(), libp2p_crypto:sig_fun()) -> txn_rewards_v2().
 sign(Txn, _SigFun) ->
