@@ -4639,7 +4639,7 @@ cache_fold(Ledger, {CFName, DB, CF}, Fun0, OriginalAcc, Opts) ->
                 {return, Res} ->
                     Res;
                 {TrailingKeys, Res0} ->
-                    process_fun(TrailingKeys, Cache, CFName, Start, End, Fun0, Res0)
+                    try process_fun(TrailingKeys, Cache, CFName, Start, End, Fun0, Res0) catch throw:{return,Res} -> Res end
             end
     end.
 
@@ -5095,6 +5095,7 @@ random_targeting_hex(RandState, Ledger) ->
 
 remove_hex_from_random_lookup(ParentRes, Ledger) ->
     %% we only want to do this if poc version >= 6, which means h3dex targeting
+    Begin = erlang:monotonic_time(millisecond),
     case config(?poc_targeting_version, Ledger) of
         {ok, N} when N >= 6 ->
             H3CF = h3dex_cf(Ledger),
@@ -5124,52 +5125,65 @@ remove_hex_from_random_lookup(ParentRes, Ledger) ->
              ),
             %% update the population
             {ok, <<Total:32/integer-unsigned-little>>} = cache_get(Ledger, H3CF, <<"population">>, []),
-           cache_put(Ledger, H3CF, <<"population">>, <<(Total-1):32/integer-unsigned-little>>),
-           ok;
+            cache_put(Ledger, H3CF, <<"population">>, <<(Total-1):32/integer-unsigned-little>>),
+            cache_delete(Ledger, H3CF, <<"random-", (Total-1):32/integer-unsigned-little>>),
+            lager:info("remove_hex_from_random_lookup in ~p ms",[erlang:monotonic_time(millisecond) - Begin]),
+            ok;
         _ ->
             ok
     end.
 
-
 add_hex_to_random_lookup(ParentRes, Ledger) ->
     %% we only want to do this if poc version >= 6, which means h3dex targeting
+    Begin = erlang:monotonic_time(millisecond),
     case config(?poc_targeting_version, Ledger) of
         {ok, N} when N >= 6 ->
             H3CF = h3dex_cf(Ledger),
+            ParentKey = h3_to_key(ParentRes),
             cache_fold(
               Ledger, H3CF,
               fun({<<"random-", OldCount:32/integer-unsigned-big>>, <<Hex:64/integer-unsigned-little>>}, HasMatched) ->
-                      case h3_to_key(Hex) > h3_to_key(ParentRes) of
-                          true ->
-                              case HasMatched of
-                                  false ->
-                                      cache_put(Ledger, H3CF, <<"random-", OldCount:32/integer-unsigned-big>>, <<ParentRes:64/integer-unsigned-little>>);
-                                  true ->
-                                      %% already inserted ourselves
-                                      ok
-                              end,
+                      HexKey = h3_to_key(Hex),
+                      case {HexKey, ParentKey}  of
+                          {A, B} when A > B ->
+                              lager:info("moving ~p from ~p to ~p", [Hex, OldCount, OldCount+1]),
                               %% move this up by one
                               cache_put(Ledger, H3CF, <<"random-", (OldCount+1):32/integer-unsigned-big>>, <<Hex:64/integer-unsigned-little>>),
-                              true;
-                          false ->
-                                HasMatched
-                      end;
+                              HasMatched;
+                          {A, A} ->
+                              lager:info("Hex ~p already present!", [ParentRes]),
+                              throw({return, error});
+                          {A, B} when A < B ->
+                              case HasMatched of
+                                  false ->
+                                      lager:info("inserting ~p at ~p", [ParentRes, OldCount+1]),
+                                      %% insert ourself above this one
+                                      cache_put(Ledger, H3CF, <<"random-", (OldCount+1):32/integer-unsigned-big>>, <<ParentRes:64/integer-unsigned-little>>),
+                                      throw({return, done});
+                                  true ->
+                                      %% already inserted ourselves, do nothing
+                                      %% TO-DO, could throw here to shortcut additional iterations
+                                      throw({return, done})
+                              end
+                      end;        
                  (_, Acc) ->
                       Acc
               end, false,
               [
-               {start, {seek, <<"random-", 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0>>}},
-               {iterate_upper_bound, <<"random-ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ">>}
+               {start, {seek, <<"random-ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ">>}},
+               {iterate_lower_bound, <<"random-", 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0>>},
+               {reverse, true}
               ]
              ),
             %% update the population
             {ok, <<Total:32/integer-unsigned-little>>} = cache_get(Ledger, H3CF, <<"population">>, []),
-           cache_put(Ledger, H3CF, <<"population">>, <<(Total+1):32/integer-unsigned-little>>),
-           ok;
+            cache_put(Ledger, H3CF, <<"population">>, <<(Total+1):32/integer-unsigned-little>>),
+            lager:info("add_hex_to_random_lookup in ~p ms",[erlang:monotonic_time(millisecond) - Begin]),
+            ok;
         _ ->
             ok
     end.
-
+    
 build_random_hex_targeting_lookup(Resolution, Ledger) ->
     %% we only want to do this if poc version >= 4, which means h3dex targeting
     case config(?poc_targeting_version, Ledger) of
